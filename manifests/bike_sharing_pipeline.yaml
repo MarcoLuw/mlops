@@ -1,0 +1,397 @@
+# PIPELINE DEFINITION
+# Name: bike-sharing-pipeline
+# Description: Kubeflow Pipeline that executes feature engineering, model training, and inference.
+components:
+  comp-deploy-model:
+    executorLabel: exec-deploy-model
+    inputDefinitions:
+      artifacts:
+        mlflow_experiment_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        infer_namespace:
+          parameterType: STRING
+        service_account_name:
+          parameterType: STRING
+  comp-feature-engineering:
+    executorLabel: exec-feature-engineering
+  comp-train-log-model:
+    executorLabel: exec-train-log-model
+    outputDefinitions:
+      artifacts:
+        mlflow_experiment_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-deploy-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_model(mlflow_experiment_data: Input[Dataset], service_account_name:\
+          \ str, infer_namespace: str):\n    from kubernetes import client \n    import\
+          \ kserve\n    import json\n    import os\n\n    # MLFLOW_REGISTERED_MODEL_NAME\
+          \ = \"bike-sharing-model\"\n    # MLFLOW_BUCKET_NAME = \"lg-mlflow-compose-bucket\"\
+          \n\n    mlflow_registered_model_name = os.environ['MLFLOW_REGISTERED_MODEL_NAME']\n\
+          \    mlflow_bucket_name = os.environ['MLFLOW_BUCKET_NAME']\n\n    with open(mlflow_experiment_data.path,\
+          \ \"r\") as f:\n        data = json.load(f)\n\n    model_version = \"latest\"\
+          \n\n    storage_uri = (\n        \"s3://{bucket_name}/{experiment_id}/{run_id}/artifacts/{model_path}\"\
+          .format(\n            bucket_name=mlflow_bucket_name,\n            experiment_id=data[\"\
+          experiment_id\"],\n            run_id=data[\"child_run_id\"],\n        \
+          \    model_path=\"model\",  # this is path when we log model\n        )\n\
+          \    )\n\n    isvc_name = \"mlflow-v2-bsd\"\n    isvc = kserve.V1beta1InferenceService(\n\
+          \        api_version=kserve.constants.KSERVE_GROUP + \"/v1beta1\",\n   \
+          \     kind=kserve.constants.KSERVE_KIND,\n        metadata=client.V1ObjectMeta(\n\
+          \            name=isvc_name,\n            namespace=infer_namespace,\n \
+          \           labels={\n                \"mlflow/model-name\": mlflow_registered_model_name,\n\
+          \                \"mlflow/model-version\": model_version,\n            \
+          \    # \"modelregistry/registered-model-id\": model.id,\n              \
+          \  # \"modelregistry/model-version-id\": version.id,\n            },\n \
+          \           annotations={\"sidecar.istio.io/inject\": \"true\"},\n     \
+          \   ),\n        spec=kserve.V1beta1InferenceServiceSpec(\n            predictor=kserve.V1beta1PredictorSpec(\n\
+          \                service_account_name=service_account_name,\n          \
+          \      model=kserve.V1beta1ModelSpec(\n                    # The protocol\
+          \ is model-registry://{modelName}/{modelVersion}\n                    storage_uri=storage_uri,\n\
+          \                    model_format=kserve.V1beta1ModelFormat(\n         \
+          \               # for mlflow, version is not needed\n                  \
+          \      # name=art.model_format_name, version=art.model_format_version\n\
+          \                        name=\"mlflow\"\n                    ),\n     \
+          \               protocol_version=kserve.constants.PredictorProtocol.REST_V2.value,\n\
+          \                ),\n            )\n        ),\n    )\n\n    ks_client =\
+          \ kserve.KServeClient()\n    result = None\n\n    try:\n        if ks_client.get(isvc_name):\n\
+          \            print(f\"InferenceService '{isvc_name}' exists, replacing/patching\
+          \ ...\")\n            # we can do delete as well\n            # ks_client.delete(isvc_name)\n\
+          \            # result = ks_client.patch(isvc_name, isvc)\n            result\
+          \ = ks_client.replace(isvc_name, isvc)\n    except client.ApiException as\
+          \ e:\n        if e.status == 404:\n            print(f\"InferenceService\
+          \ '{isvc_name}' not exist, creating ...\")\n            result = ks_client.create(isvc)\n\
+          \        else:\n            raise\n    except Exception as e:\n        print(\n\
+          \            f\"Got exception {e} when get InferenceService '{isvc_name}',\
+          \ anyway creating ...\"\n        )\n        result = ks_client.create(isvc)\n\
+          \    finally:\n        if result != None:\n            print(result)\n \
+          \           print(f\"InferenceService '{isvc_name}' waiting for ready ...\"\
+          )\n            ks_client.wait_isvc_ready(isvc_name)\n\n"
+        image: hoanganh26/python-mlops:latest
+    exec-feature-engineering:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - feature_engineering
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef feature_engineering():\n    import boto3\n    import pandas as\
+          \ pd\n    import pickle\n    import os\n    from io import BytesIO\n   \
+          \ \"\"\"Feature Engineering step that processes raw data and stores it in\
+          \ S3.\"\"\"\n\n    # S3_DATA_BUCKET = \"lg-mlops-data-bucket\"\n    # S3_PROCESSED_KEY\
+          \ = \"processed_data.pkl\"\n    # S3_PROCESSED_DATA = \"full_processed_data.pkl\"\
+          \n\n    s3_data_bucket = os.environ['S3_DATA_BUCKET']\n    s3_processed_key\
+          \ = os.environ['S3_PROCESSED_KEY']\n    s3_processed_data = os.environ['S3_PROCESSED_DATA']\n\
+          \n    s3 = boto3.client('s3', aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],\n\
+          \                      aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],\n\
+          \                      region_name=os.environ['AWS_REGION'])\n\n    obj\
+          \ = s3.get_object(Bucket=s3_data_bucket, Key='train.csv')\n    df = pd.read_csv(obj['Body'])\n\
+          \n    df['datetime'] = pd.to_datetime(df['datetime'])\n    df['hour'] =\
+          \ df['datetime'].dt.hour\n    df['weekday'] = df['datetime'].dt.weekday\n\
+          \    df['month'] = df['datetime'].dt.month\n\n    lower_bound, upper_bound\
+          \ = df['count'].quantile([0.03, 0.97])\n    df = df[(df['count'] >= lower_bound)\
+          \ & (df['count'] <= upper_bound)]\n\n    x = df.drop(columns=[\"count\"\
+          , \"datetime\", \"casual\", \"registered\"], axis=1)\n    y = df[[\"count\"\
+          ]]\n    x = pd.get_dummies(x, drop_first=True)\n\n    buffer = BytesIO()\n\
+          \    pickle.dump((x, y), buffer)\n    buffer.seek(0)\n    s3.put_object(Bucket=s3_data_bucket,\
+          \ Key=s3_processed_key, Body=buffer.getvalue())\n    buffer.close()\n  \
+          \  del buffer\n\n    df_buffer = BytesIO()\n    pickle.dump(df, df_buffer)\n\
+          \    df_buffer.seek(0)\n    s3.put_object(Bucket=s3_data_bucket, Key=s3_processed_data,\
+          \ Body=df_buffer.getvalue())\n    df_buffer.close()\n    del df_buffer\n\
+          \n"
+        image: hoanganh26/python-mlops:latest
+    exec-train-log-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_log_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_log_model(mlflow_experiment_data: Output[Dataset]):\n \
+          \   import os\n    import boto3\n    import pickle\n    import mlflow\n\
+          \    import mlflow.sklearn\n    import json\n\n    from io import BytesIO\n\
+          \    from sklearn.model_selection import train_test_split\n    from sklearn.metrics\
+          \ import mean_squared_error, r2_score, mean_absolute_error\n    from sklearn.tree\
+          \ import DecisionTreeRegressor\n    from xgboost import XGBRegressor\n \
+          \   \"\"\"Train Decision Tree and XGBoost models, log metrics to MLflow,\
+          \ and return the best model name.\"\"\"\n\n    # S3_DATA_BUCKET = \"lg-mlops-data-bucket\"\
+          \n    # MLFLOW_TRACKING_URI = \"http://43.200.50.207:5001/\"\n    # MLFLOW_EXPERIMENT\
+          \ = \"bike-sharing-jenkins\"\n    # MLFLOW_ARTIFACT_PATH = \"model\"\n\n\
+          \    s3_data_bucket = os.environ['S3_DATA_BUCKET']\n    s3_processed_key\
+          \ = os.environ['S3_PROCESSED_KEY']\n    mlflow_experiment = os.environ['MLFLOW_EXPERIMENT']\n\
+          \    mlflow_tracking_uri = os.environ['MLFLOW_TRACKING_URI']\n    mlflow_artifact_path\
+          \ = os.environ['MLFLOW_ARTIFACT_PATH']\n\n    # s3 = boto3.client('s3')\n\
+          \    s3 = boto3.client('s3', aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],\n\
+          \                      aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],\n\
+          \                      region_name=os.environ['AWS_REGION'])\n\n    obj\
+          \ = s3.get_object(Bucket=s3_data_bucket, Key=s3_processed_key)\n    x, y\
+          \ = pickle.load(BytesIO(obj['Body'].read()))\n\n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \    experiment_id = mlflow.set_experiment(mlflow_experiment).experiment_id\n\
+          \    parent_run_id = None\n\n    dt, xgb = DecisionTreeRegressor(), XGBRegressor()\n\
+          \    algos, algo_names = [dt, xgb], ['DecisionTreeRegressor', 'XGBRegressor']\n\
+          \    best_score, run_id = float('-inf'), \"\"\n\n    x_train, x_test, y_train,\
+          \ y_test = train_test_split(x, y, test_size=0.2, random_state=42)\n\n  \
+          \  with mlflow.start_run() as parent_run:\n        parent_run_id = parent_run.info.run_id\n\
+          \        for i, algo in enumerate(algos):\n            predict = algo.fit(x_train,\
+          \ y_train).predict(x_test)\n            r2 = r2_score(y_test, predict)\n\
+          \n            signature = mlflow.models.infer_signature(x_test, predict)\n\
+          \            with mlflow.start_run(nested=True) as child_run:\n        \
+          \        mlflow.log_metric(\"r_squared\", r2_score(y_test,predict))\n  \
+          \              mlflow.log_metric(\"rmse\", mean_squared_error(y_test,predict)**0.5)\n\
+          \                mlflow.log_metric(\"mae\", mean_absolute_error(y_test,predict))\n\
+          \                model_info = mlflow.sklearn.log_model(\n              \
+          \      sk_model=algo,\n                    artifact_path=mlflow_artifact_path,\
+          \     # MLFLOW_ARTIFACT_PATH = \"model\"\n                    registered_model_name=f\"\
+          bike-sharing-demand-{algo_names[i]}\",\n                    signature=signature\n\
+          \                )\n                child_run_id = child_run.info.run_id\n\
+          \                model_uri = model_info.model_uri\n                model_uuid\
+          \ = model_info.model_uuid\n\n            if r2 > best_score:\n         \
+          \       best_score, run_id = r2, child_run_id\n            print(f'Model\
+          \ info: \\nModel URI: {model_uri}, \\nModel UUID: {model_uuid}')\n\n   \
+          \ with open(mlflow_experiment_data.path, \"w\") as f:\n        json.dump(\n\
+          \            {\n                \"experiment_id\": experiment_id,\n    \
+          \            \"parent_run_id\": parent_run_id,\n                \"child_run_id\"\
+          : run_id\n            },\n            f\n        )\n\n"
+        image: hoanganh26/python-mlops:latest
+pipelineInfo:
+  description: Kubeflow Pipeline that executes feature engineering, model training,
+    and inference.
+  name: bike-sharing-pipeline
+root:
+  dag:
+    tasks:
+      deploy-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-deploy-model
+        dependentTasks:
+        - train-log-model
+        inputs:
+          artifacts:
+            mlflow_experiment_data:
+              taskOutputArtifact:
+                outputArtifactKey: mlflow_experiment_data
+                producerTask: train-log-model
+          parameters:
+            infer_namespace:
+              runtimeValue:
+                constant: kubeflow-user-example-com
+            service_account_name:
+              runtimeValue:
+                constant: kserve-s3-sa
+        taskInfo:
+          name: deploy-model
+      feature-engineering:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-feature-engineering
+        taskInfo:
+          name: feature-engineering
+      train-log-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-log-model
+        dependentTasks:
+        - feature-engineering
+        taskInfo:
+          name: train-log-model
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.12.1
+---
+platforms:
+  kubernetes:
+    deploymentSpec:
+      executors:
+        exec-deploy-model:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials
+        exec-feature-engineering:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials
+        exec-train-log-model:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials

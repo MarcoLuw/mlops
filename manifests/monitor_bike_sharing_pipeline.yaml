@@ -1,0 +1,400 @@
+# PIPELINE DEFINITION
+# Name: pipeline-bike-share-demand-monitor
+# Description: pipeline_bike_share_demand_monitor
+components:
+  comp-alert-model-degradation:
+    executorLabel: exec-alert-model-degradation
+    inputDefinitions:
+      artifacts:
+        alert_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-monitor-data-drift:
+    executorLabel: exec-monitor-data-drift
+    outputDefinitions:
+      artifacts:
+        alert_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        data_drift_report:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-monitor-model:
+    executorLabel: exec-monitor-model
+    outputDefinitions:
+      artifacts:
+        alert_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        model_quality_regression_report:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-alert-model-degradation:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - alert_model_degradation
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef alert_model_degradation(alert_data: Input[Dataset]):\n    \"\"\
+          \"\n    Alert will be sent to MS Teams if data drfit or model degradation\
+          \ are found.\n    \"\"\"\n    import requests\n    import json\n\n    with\
+          \ open(alert_data.path, \"r\") as f:\n        monitor_data = json.load(f)\n\
+          \n    dataset_drift = int(monitor_data[\"dataset_drift\"])\n    num_of_drifted_columns\
+          \ = int(monitor_data[\"number_of_drifted_columns\"])\n\n    if dataset_drift\
+          \ != 1:\n        print(f'-- Your model is resillient! No need to retrain\
+          \ --')\n\n    # Trigger retrain if dataset is drifted\n    power_automate_webhook_url\
+          \ = 'https://prod-89.southeastasia.logic.azure.com:443/workflows/0a23ef526a284a6895d9cfa747263a6b/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=tK0ij-sWt1So0ohRgyDFa2xt9ZN4tqBsCK1saqdIUp4'\
+          \  # MS Teams HTTP trigger URL\n\n    payload = {\n        \"drift_detected\"\
+          : True,\n        \"details\": f\"Number of drifted columns: {num_of_drifted_columns}\"\
+          \n    }\n\n    requests.post(power_automate_webhook_url, json=payload)\n\
+          \n"
+        image: hoanganh26/python-mlops:latest
+    exec-monitor-data-drift:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - monitor_data_drift
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'evidently==0.6.6'\
+          \ 'tabulate' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef monitor_data_drift(data_drift_report: Output[Dataset], alert_data:\
+          \ Output[Dataset]):\n    \"\"\"\n    This function is to monitor data drift\
+          \ of the model aspect\n\n    Data drift is critical since we need to understand\
+          \ data is changing with new distribution\n    Model quality is affected\
+          \ by this, when data is drifted, we might need to retrain model as well\n\
+          \    \"\"\"\n    import os\n    import os\n    import json\n    import boto3\n\
+          \    import pickle\n    import pandas as pd\n    import numpy as np\n  \
+          \  from io import BytesIO\n    from evidently import ColumnMapping\n   \
+          \ from evidently.report import Report\n    from evidently.metric_preset\
+          \ import DataDriftPreset\n    from evidently.ui.workspace import RemoteWorkspace\n\
+          \    from tabulate import tabulate\n\n    # Note: there is no real data,\
+          \ so we're faking data for data drifting demo\n    s3_data_bucket = os.environ['S3_DATA_BUCKET']\n\
+          \    s3_processed_data = os.environ['S3_PROCESSED_DATA']\n\n    s3 = boto3.client('s3',\
+          \ aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],\n                 \
+          \     aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],\n     \
+          \                 region_name=os.environ['AWS_REGION'])\n\n    obj = s3.get_object(Bucket=s3_data_bucket,\
+          \ Key=s3_processed_data)\n    df = pickle.load(BytesIO(obj['Body'].read()))\n\
+          \n    df[\"prediction\"] = df[\"count\"].apply(\n        lambda x: np.random.normal(loc=x,\
+          \ scale=x * 0.1)\n    )\n\n    numerical_features = [\"temp\", \"atemp\"\
+          , \"humidity\", \"windspeed\", \"hour\", \"weekday\", \"month\"]\n    categorical_features\
+          \ = [\"season\", \"holiday\", \"workingday\"]\n    column_mapping = ColumnMapping()\n\
+          \    column_mapping.target = \"count\"\n    column_mapping.prediction =\
+          \ \"prediction\"\n    column_mapping.numerical_features = numerical_features\n\
+          \    column_mapping.categorical_features = categorical_features\n\n    #\
+          \ stattest_threshold: Sets the drift threshold in a given column or all\
+          \ columns.\n    # drift_share:        over 70% columns are drifting -->\
+          \ detect dataset drift (default = 0.5)\n    data_drift = Report(\n     \
+          \       metrics=[DataDriftPreset(stattest_threshold=0.2, drift_share=0.7)],\
+          \ \n            options={\"render\": {\"raw_data\": True}}\n        )\n\n\
+          \    cnt = len(df)\n    split = int(cnt * 70/100)\n    data_drift.run(\n\
+          \        current_data=df[split:],\n        reference_data=df[:split],\n\
+          \        column_mapping=column_mapping\n    )\n    data_drift.save_html(data_drift_report.path)\n\
+          \n    # Upload Report to Project on Evidently UI\n    workspace = \"http://43.200.50.207:8000\"\
+          \n    ws = RemoteWorkspace(workspace)\n\n    project_name = \"mlops-2025\"\
+          \n    if not any(p.name == project_name for p in ws.list_projects()):\n\
+          \        print(f\"Project does not exist. \\nGenerating project {project_name}...\"\
+          )\n        ws.create_project(name=project_name, description=\"Project for\
+          \ LG Enterprise MLOPs 2025\")\n\n    project = ws.search_project(project_name=project_name)[0]\n\
+          \    print(f\"--- Project info: --- \\nProject Name: {project.name} \\nProject\
+          \ ID: {project.id}\")\n\n    ws.add_report(project_id=project.id, report=data_drift)\n\
+          \    print(f'--- Add Data Drift Report to project {project_name}')\n\n \
+          \   data_drift_dict = data_drift.as_dict()[\"metrics\"]\n    drift_metric\
+          \ = next(\n        filter(lambda item: item[\"metric\"] == \"DatasetDriftMetric\"\
+          , data_drift_dict)\n    )\n    drift_metric_table = next(\n        filter(lambda\
+          \ item: item[\"metric\"] == \"DataDriftTable\", data_drift_dict)\n    )\n\
+          \n    feature_drift = []\n    for feature, drift_analysis in drift_metric_table[\"\
+          result\"][\n        \"drift_by_columns\"\n    ].items():\n        feature_drift.append(\n\
+          \            [\n                feature,\n                drift_analysis[\"\
+          drift_detected\"],\n                drift_analysis[\"stattest_name\"],\n\
+          \                drift_analysis[\"stattest_threshold\"],\n             \
+          \   drift_analysis[\"drift_score\"],\n            ]\n        )\n    print(\n\
+          \        tabulate(\n            pd.DataFrame(\n                feature_drift,\n\
+          \                columns=[\"Feature\", \"Drift\", \"Method\", \"Threshold\"\
+          , \"Value\"],\n            ),\n            headers=\"keys\",\n         \
+          \   tablefmt=\"psql\",\n        )\n    )\n    print(\n        tabulate(\n\
+          \            pd.DataFrame(\n                list(drift_metric[\"result\"\
+          ].items()), columns=[\"Key\", \"Value\"]\n            ),\n            headers=\"\
+          keys\",\n            tablefmt=\"psql\",\n        )\n    )\n\n    # Extract\
+          \ dataset-level drift\n    dataset_drift_value = drift_metric[\"result\"\
+          ][\"dataset_drift\"]\n    number_of_drifted_columns = drift_metric[\"result\"\
+          ][\"number_of_drifted_columns\"]\n    print(f'--- Monitor data: --- \\ndataset_drift:\
+          \ {dataset_drift_value} \\nnum_of_columns_is_drifted: {number_of_drifted_columns}')\n\
+          \n    with open(alert_data.path, \"w\") as f:\n        json.dump(\n    \
+          \        {\n                \"dataset_drift\": dataset_drift_value,\n  \
+          \              \"num_of_drifted_columns\": number_of_drifted_columns\n \
+          \           },\n            f\n        )\n\n"
+        image: hoanganh26/python-mlops:latest
+    exec-monitor-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - monitor_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'evidently==0.6.6'\
+          \ 'tabulate' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef monitor_model(model_quality_regression_report: Output[Dataset],\
+          \ alert_data: Output[Dataset]):\n    import os\n    import json\n    import\
+          \ boto3\n    import pickle\n    import pandas as pd\n    import numpy as\
+          \ np\n    from io import BytesIO\n    from evidently import ColumnMapping\n\
+          \    from evidently.report import Report\n    from evidently.metric_preset\
+          \ import (\n        DataDriftPreset,\n        TargetDriftPreset,\n     \
+          \   RegressionPreset,\n    )\n    from tabulate import tabulate\n    \"\"\
+          \"\n    This component is for monitoring model using evidently.\n    \"\"\
+          \"\n\n    # Note: there is no real data, so we're faking data for data drifting\
+          \ demo\n    s3_data_bucket = os.environ['S3_DATA_BUCKET']\n    s3_processed_data\
+          \ = os.environ['S3_PROCESSED_DATA']\n\n    s3 = boto3.client('s3', aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],\n\
+          \                      aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],\n\
+          \                      region_name=os.environ['AWS_REGION'])\n\n    obj\
+          \ = s3.get_object(Bucket=s3_data_bucket, Key=s3_processed_data)\n    df\
+          \ = pickle.load(BytesIO(obj['Body'].read()))\n\n    df[\"prediction\"] =\
+          \ df[\"count\"].apply(\n        lambda x: np.random.normal(loc=x, scale=x\
+          \ * 0.1)\n    )\n\n    numerical_features = [\"temp\", \"atemp\", \"humidity\"\
+          , \"windspeed\", \"hour\", \"weekday\", \"month\"]\n    categorical_features\
+          \ = [\"season\", \"holiday\", \"workingday\"]\n    column_mapping = ColumnMapping()\n\
+          \    column_mapping.target = \"count\"\n    column_mapping.prediction =\
+          \ \"prediction\"\n    column_mapping.numerical_features = numerical_features\n\
+          \    column_mapping.categorical_features = categorical_features\n\n    regression_performance\
+          \ = Report(metrics=[RegressionPreset()], options={\"render\": {\"raw_data\"\
+          : True}})\n    regression_performance.run(current_data=df, reference_data=None,\
+          \ column_mapping=column_mapping)\n    regression_performance.save_html(model_quality_regression_report.path)\n\
+          \n    key_metrics = [\"r2_score\", \"rmse\", \"mean_error\", \"mean_abs_error\"\
+          ]\n    print(regression_performance.as_dict()[\"metrics\"][0][\"metric\"\
+          ])\n\n    regression_metric = next(filter(lambda item: item[\"metric\"]==\"\
+          RegressionQualityMetric\", regression_performance.as_dict()[\"metrics\"\
+          ]))\n    metrics = regression_metric[\"result\"][\"current\"]\n\n    data\
+          \ = []\n    for k in key_metrics:\n        data.append([k, round(metrics[k],\
+          \ 2)])\n    print(tabulate(data, headers=[\"metric\", \"value\"], tablefmt=\"\
+          psql\"))\n\n"
+        image: hoanganh26/python-mlops:latest
+pipelineInfo:
+  description: pipeline_bike_share_demand_monitor
+  name: pipeline-bike-share-demand-monitor
+root:
+  dag:
+    tasks:
+      alert-model-degradation:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-alert-model-degradation
+        dependentTasks:
+        - monitor-data-drift
+        inputs:
+          artifacts:
+            alert_data:
+              taskOutputArtifact:
+                outputArtifactKey: alert_data
+                producerTask: monitor-data-drift
+        taskInfo:
+          name: alert-model-degradation
+      monitor-data-drift:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-monitor-data-drift
+        dependentTasks:
+        - monitor-model
+        taskInfo:
+          name: monitor-data-drift
+      monitor-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-monitor-model
+        taskInfo:
+          name: monitor-model
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.12.1
+---
+platforms:
+  kubernetes:
+    deploymentSpec:
+      executors:
+        exec-alert-model-degradation:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials
+        exec-monitor-data-drift:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials
+        exec-monitor-model:
+          configMapAsEnv:
+          - configMapName: mlflow-s3-cm
+            keyToEnv:
+            - configMapKey: MLFLOW_TRACKING_URI
+              envVar: MLFLOW_TRACKING_URI
+            - configMapKey: MLFLOW_EXPERIMENT
+              envVar: MLFLOW_EXPERIMENT
+            - configMapKey: MLFLOW_REGISTERED_MODEL_NAME
+              envVar: MLFLOW_REGISTERED_MODEL_NAME
+            - configMapKey: MLFLOW_ARTIFACT_PATH
+              envVar: MLFLOW_ARTIFACT_PATH
+            - configMapKey: MLFLOW_BUCKET_NAME
+              envVar: MLFLOW_BUCKET_NAME
+            - configMapKey: S3_DATA_BUCKET
+              envVar: S3_DATA_BUCKET
+            - configMapKey: S3_PROCESSED_KEY
+              envVar: S3_PROCESSED_KEY
+            - configMapKey: S3_PROCESSED_DATA
+              envVar: S3_PROCESSED_DATA
+          - configMapName: git-cm
+            keyToEnv:
+            - configMapKey: REPO_URL
+              envVar: REPO_URL
+            - configMapKey: REPO_DIR
+              envVar: REPO_DIR
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: AWS_ACCESS_KEY_ID
+              secretKey: AWS_ACCESS_KEY_ID
+            - envVar: AWS_SECRET_ACCESS_KEY
+              secretKey: AWS_SECRET_ACCESS_KEY
+            - envVar: AWS_REGION
+              secretKey: AWS_REGION
+            secretName: s3-credentials
+          - keyToEnv:
+            - envVar: GIT_USERNAME
+              secretKey: GIT_USERNAME
+            - envVar: GIT_PASSWORD
+              secretKey: GIT_PASSWORD
+            secretName: git-credentials
