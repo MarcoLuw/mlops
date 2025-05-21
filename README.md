@@ -1,5 +1,5 @@
 # MLOps
-This is the first phase of mlops project with totally built on open-source
+This is the first phase of mlops project with totally built on open-source <br />
 For full version, please check it out on my Gitlab: https://gitlab.com/mlops-oss/mlops-pipeline#
 
 # Kubernetes and Kubeflow MLOps Platform Setup Guide
