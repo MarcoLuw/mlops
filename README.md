@@ -1,4 +1,4 @@
-# mlops
+# MLOps
 This is the first phase of mlops project with totally built on open-source
 
 # Kubernetes and Kubeflow MLOps Platform Setup Guide
